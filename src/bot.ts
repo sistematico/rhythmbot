@@ -108,7 +108,7 @@ interface RadioStation {
 
 const RADIO_STATIONS: RadioStation[] = [
   { id: 'sdm',      name: 'Som do Mato',    emoji: '🌎', url: 'https://radio.somdomato.com/geral' },
-  { id: 'rtm',      name: 'Rhythm Place',    emoji: '🌎', url: 'https://stream.rhythm.place/main.mp3' },
+  { id: 'rtm',      name: 'Rhythm Place',    emoji: '🌎', url: 'https://stream.rhythm.place/stream' },
   { id: 'jovempan',       name: 'Jovem Pan',      emoji: '📻', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/JOVEMPANFM.mp3' },
   { id: 'antena1',        name: 'Antena 1',       emoji: '🎵', url: 'https://antenaone.crossradio.com.br/stream/1' },
   { id: 'cbn',            name: 'CBN',            emoji: '🗣️', url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/CBNAM.mp3' },
