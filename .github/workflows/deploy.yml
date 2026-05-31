@@ -43,7 +43,9 @@ jobs:
             git reset --hard origin/main
             git clean -fxd -e .env
             cp .env .env.production
-            /home/rhythmbot/.local/share/pnpm/pnpm install 
+            /home/rhythmbot/.local/share/pnpm/pnpm install
             /home/rhythmbot/.local/share/pnpm/pnpm build
+            sudo /usr/bin/cp files/rhythmbot.service /etc/systemd/system/rhythmbot.service
+            sudo /usr/bin/systemctl daemon-reload
             sudo /usr/bin/systemctl restart rhythmbot
             
