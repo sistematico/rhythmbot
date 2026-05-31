@@ -1,4 +1,4 @@
-# Gigi
+# Rhythm Bot
 
 Bot do Discord que toca áudio do YouTube em canais de voz.
 
