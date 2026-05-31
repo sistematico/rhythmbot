@@ -131,19 +131,31 @@ interface DfiTrack {
   VERSION?: string;
 }
 
+interface DfiSearchTrack {
+  SNG_ID?: string;
+}
+
 async function fetchTrack(query: string): Promise<{ type: 'deezer'; track: DfiTrack }> {
   // Deezer URL
   const deezerMatch = query.match(DEEZER_TRACK_RE);
   if (deezerMatch) {
     const track = await dfi.getTrackInfo(deezerMatch[1]);
+    if (!track?.SNG_ID) {
+      throw new Error('Faixa não encontrada no Deezer.');
+    }
     return { type: 'deezer', track };
   }
 
   // Busca no Deezer
   const results = await dfi.searchMusic(query, ['TRACK'], 1);
-  const tracks = results?.TRACK?.data;
-  if (tracks?.length) {
-    return { type: 'deezer', track: tracks[0] };
+  const tracks = results?.TRACK?.data as DfiSearchTrack[] | undefined;
+  const firstTrackId = tracks?.[0]?.SNG_ID;
+  if (firstTrackId) {
+    const fullTrack = await dfi.getTrackInfo(firstTrackId);
+    if (!fullTrack?.SNG_ID) {
+      throw new Error('Não foi possível carregar os dados completos da faixa.');
+    }
+    return { type: 'deezer', track: fullTrack };
   }
 
   throw new Error('Nenhum resultado encontrado no Deezer.');
