@@ -27,12 +27,5 @@
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   },
-  "packageManager": "pnpm@10.33.0",
-  "pnpm": {
-    "overrides": {
-      "axios": "^1.7.0",
-      "follow-redirects": "^1.15.11",
-      "tar": "^7.5.11"
-    }
-  }
+  "packageManager": "pnpm@10.33.0"
 }
