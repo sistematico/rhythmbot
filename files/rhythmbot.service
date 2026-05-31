@@ -6,7 +6,7 @@ After=network.target
 # User running the bot (e.g., node, ubuntu, or root)
 User=rhythmbot
 WorkingDirectory=/home/rhythmbot/rhythmbot
-ExecStart=/home/rhythmbot/.local/share/pnpm run start
+ExecStart=/home/rhythmbot/.local/share/pnpm/pnpm run start
 Restart=always
 RestartSec=10
 StandardOutput=syslog
