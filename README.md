@@ -1,10 +1,10 @@
 # Rhythm Bot
 
-Bot do Discord que toca áudio do YouTube em canais de voz.
+Bot do Discord que toca faixas do Deezer e streams de rádio em canais de voz.
 
 ## Pré-requisitos
 
-- Node.js 18+
+- Node.js 22.12+
 - pnpm
 - Uma aplicação criada no [Discord Developer Portal](https://discord.com/developers/applications)
 
@@ -41,6 +41,8 @@ Observação: se aparecer `VALID_TOKEN_REQUIRED` ou `Invalid CSRF token`, o valo
 pnpm install
 ```
 
+O projeto usa `opusscript` como fallback puro em JavaScript, então a instalação não depende do build nativo de `@discordjs/opus` no Windows.
+
 ## Adicionando o bot ao servidor
 
 Gere o link de convite substituindo `SEU_CLIENT_ID` pelo valor do seu `.env`:
@@ -76,5 +78,6 @@ Quando iniciado, o bot registra automaticamente os slash commands e exibe a mens
 
 | Comando | Descrição |
 |---------|-----------|
-| `/play <url ou busca>` | Toca um vídeo do YouTube no canal de voz em que você está |
+| `/play <url ou busca>` | Toca uma faixa do Deezer no canal de voz em que você está |
+| `/radio` | Exibe as rádios disponíveis para tocar ao vivo no canal de voz |
 | `/stop` | Para a reprodução e desconecta o bot do canal de voz |

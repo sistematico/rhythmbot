@@ -4,7 +4,9 @@ overrides:
   tar: ">=7.5.11"
 
 onlyBuiltDependencies:
-  - '@discordjs/opus'
   - esbuild
   - ffmpeg-static
   - sodium-native
+
+ignoredBuiltDependencies:
+  - '@discordjs/opus'
