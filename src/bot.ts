@@ -85,6 +85,16 @@ const commands = [
         .setRequired(true),
     ),
   new SlashCommandBuilder()
+    .setName('rm')
+    .setDescription('Atalho para remover uma música da fila pelo número')
+    .addIntegerOption(option =>
+      option
+        .setName('posicao')
+        .setDescription('Número da música na fila (use /queue para ver)')
+        .setMinValue(1)
+        .setRequired(true),
+    ),
+  new SlashCommandBuilder()
     .setName('volume')
     .setDescription('Ajusta o volume da reprodução (0–100)')
     .addIntegerOption(option =>
@@ -95,6 +105,9 @@ const commands = [
         .setMaxValue(100)
         .setRequired(true),
     ),
+  new SlashCommandBuilder()
+    .setName('random')
+    .setDescription('Sugere uma música baseada na playlist atual e permite adicionar ou descartar'),
 ] as const;
 
 // ─── Radio stations ───────────────────────────────────────────────────────────
@@ -135,6 +148,11 @@ interface DfiSearchTrack {
   SNG_ID?: string;
 }
 
+interface RandomSuggestion {
+  track: DfiTrack;
+  basedOn: DfiTrack;
+}
+
 async function fetchTrack(query: string): Promise<{ type: 'deezer'; track: DfiTrack }> {
   // Deezer URL
   const deezerMatch = query.match(DEEZER_TRACK_RE);
@@ -159,6 +177,10 @@ async function fetchTrack(query: string): Promise<{ type: 'deezer'; track: DfiTr
   }
 
   throw new Error('Nenhum resultado encontrado no Deezer.');
+}
+
+function pickRandom<T>(items: T[]): T {
+  return items[Math.floor(Math.random() * items.length)];
 }
 
 async function downloadTrack(track: DfiTrack): Promise<Buffer> {
@@ -209,6 +231,81 @@ function normalizePlaybackError(error: unknown): string {
   }
 
   return rawMessage;
+}
+
+function buildPlaylistSeedTracks(): DfiTrack[] {
+  const seeds: DfiTrack[] = [];
+  if (currentItem?.resolved.type === 'deezer') {
+    seeds.push(currentItem.resolved.track);
+  }
+
+  for (const item of queue) {
+    if (item.resolved.type === 'deezer') {
+      seeds.push(item.resolved.track);
+    }
+  }
+
+  return seeds;
+}
+
+function buildRandomSuggestionRow(ownerId: string, trackId: string): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`random_add_${ownerId}_${trackId}`)
+      .setLabel('Adicionar na playlist')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`random_discard_${ownerId}_${trackId}`)
+      .setLabel('Descartar')
+      .setStyle(ButtonStyle.Secondary),
+  );
+}
+
+function buildRandomSuggestionMessage(ownerId: string, suggestion: RandomSuggestion): {
+  content: string;
+  components: ActionRowBuilder<ButtonBuilder>[];
+} {
+  return {
+    content: [
+      '🎲 Sugestão baseada na sua playlist:',
+      `**${trackDisplayName(suggestion.track)}**`,
+      `Inspirada em: **${trackDisplayName(suggestion.basedOn)}**`,
+      `https://www.deezer.com/track/${suggestion.track.SNG_ID}`,
+    ].join('\n'),
+    components: [buildRandomSuggestionRow(ownerId, suggestion.track.SNG_ID)],
+  };
+}
+
+async function suggestTrackFromPlaylist(excludedIds: Set<string>): Promise<RandomSuggestion> {
+  const seeds = buildPlaylistSeedTracks();
+  if (seeds.length === 0) {
+    throw new Error('A playlist está vazia. Toque ou enfileire músicas antes de usar /random.');
+  }
+
+  const sourceTrackIds = new Set<string>(seeds.map(seed => seed.SNG_ID));
+  const shuffledSeeds = [...seeds].sort(() => Math.random() - 0.5);
+
+  for (const seed of shuffledSeeds) {
+    const results = await dfi.searchMusic(seed.ART_NAME, ['TRACK'], 30);
+    const tracks = results?.TRACK?.data as DfiSearchTrack[] | undefined;
+    const candidateIds = (tracks ?? [])
+      .map(track => track.SNG_ID)
+      .filter((id): id is string => !!id && !excludedIds.has(id) && !sourceTrackIds.has(id));
+
+    if (candidateIds.length === 0) {
+      continue;
+    }
+
+    const selectedId = pickRandom(candidateIds);
+    const fullTrack = await dfi.getTrackInfo(selectedId);
+    if (!fullTrack?.SNG_ID || excludedIds.has(fullTrack.SNG_ID) || sourceTrackIds.has(fullTrack.SNG_ID)) {
+      continue;
+    }
+
+    return { track: fullTrack, basedOn: seed };
+  }
+
+  throw new Error('Não encontrei novas sugestões no Deezer com base na sua playlist agora.');
 }
 
 // ─── Radio stream helper ──────────────────────────────────────────────────────
@@ -314,7 +411,7 @@ let queue: QueueItem[] = [];
 let currentItem: QueueItem | null = null;
 let radioState: { stationName: string; emoji: string; startedBy: string } | null = null;
 let activeGuildId: string | null = null;
-let activeVoiceChannelId: string | null = null;
+//let activeVoiceChannelId: string | null = null;
 let activeTextChannelId: string | null = null;
 type RepeatMode = 'off' | 'all' | 'one';
 let repeatMode: RepeatMode = 'off';
@@ -323,6 +420,7 @@ let isProcessingQueue = false;
 let playbackGeneration = 0;
 let queueMessageId: string | null = null;
 let volumeMessageId: string | null = null;
+const randomSuggestionExclusionsByMessage = new Map<string, Set<string>>();
 
 // ─── Permission helper ────────────────────────────────────────────────────────
 
@@ -443,10 +541,11 @@ function clearPlayerState(): void {
   radioState = null;
   repeatMode = 'off';
   activeGuildId = null;
-  activeVoiceChannelId = null;
+  //activeVoiceChannelId = null;
   activeTextChannelId = null;
   queueMessageId = null;
   volumeMessageId = null;
+  randomSuggestionExclusionsByMessage.clear();
   isProcessingQueue = false;
 }
 
@@ -476,7 +575,13 @@ async function playNextInQueue(): Promise<void> {
     return;
   }
 
-  const item = queue.shift()!;
+  const item = queue.shift();
+  if (!item) {
+    isProcessingQueue = false;
+    currentItem = null;
+    await syncQueueMessage();
+    return;
+  }
   currentItem = item;
   await syncQueueMessage();
 
@@ -590,6 +695,15 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       return;
     }
 
+    const guildId = interaction.guildId;
+    if (!guildId) {
+      await interaction.reply({
+        content: 'Este botão só pode ser usado dentro de um servidor.',
+        ephemeral: true,
+      });
+      return;
+    }
+
     // Bloqueia rádio se há playlist ativa e o usuário não é admin
     if ((currentItem !== null || queue.length > 0) && !isAdmin(member)) {
       await interaction.reply({
@@ -623,7 +737,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       const resource = await createStableAudioResource(stream);
       resource.volume?.setVolume(currentVolume);
 
-      let connection = getVoiceConnection(interaction.guildId!);
+      let connection = getVoiceConnection(guildId);
       if (!connection) {
         connection = joinVoiceChannel({
           channelId: voiceChannel.id,
@@ -640,7 +754,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       }
 
       radioState = { stationName: station.name, emoji: station.emoji, startedBy: interaction.user.id };
-      activeGuildId = interaction.guildId!;
+      activeGuildId = guildId;
 
       player.play(resource);
       connection.subscribe(player);
@@ -652,6 +766,90 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       await interaction.editReply(`Não foi possível tocar a rádio: ${msg}`);
     }
 
+    return;
+  }
+
+  // ── /random (botões) ──────────────────────────────────────────────────────
+  if (interaction.isButton() && interaction.customId.startsWith('random_')) {
+    const [prefix, action, ownerId, trackId] = interaction.customId.split('_');
+    if (prefix !== 'random' || !action || !ownerId || !trackId) {
+      await interaction.reply({ content: 'Interação inválida para sugestão aleatória.', ephemeral: true });
+      return;
+    }
+
+    if (interaction.user.id !== ownerId) {
+      await interaction.reply({ content: 'Apenas quem pediu a sugestão pode usar esses botões.', ephemeral: true });
+      return;
+    }
+
+    const messageId = interaction.message.id;
+    const excludedIds = randomSuggestionExclusionsByMessage.get(messageId) ?? new Set<string>();
+    excludedIds.add(trackId);
+    randomSuggestionExclusionsByMessage.set(messageId, excludedIds);
+
+    if (action === 'discard') {
+      await interaction.deferUpdate();
+      try {
+        const suggestion = await suggestTrackFromPlaylist(excludedIds);
+        await interaction.message.edit(buildRandomSuggestionMessage(ownerId, suggestion));
+      } catch (error) {
+        const msg = normalizePlaybackError(error);
+        await interaction.followUp({ content: `Não foi possível gerar outra sugestão: ${msg}`, ephemeral: true });
+      }
+      return;
+    }
+
+    if (action === 'add') {
+      if (radioState !== null) {
+        await interaction.reply({
+          content: 'Não é possível adicionar sugestão na playlist enquanto uma rádio está tocando.',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.deferUpdate();
+
+      try {
+        const track = await dfi.getTrackInfo(trackId);
+        if (!track?.SNG_ID) {
+          throw new Error('Faixa sugerida não encontrada no Deezer.');
+        }
+
+        const item: QueueItem = {
+          title: trackDisplayName(track),
+          addedBy: interaction.user.id,
+          addedByTag: interaction.user.tag ?? interaction.user.username,
+          resolved: { type: 'deezer', track },
+        };
+
+        queue.push(item);
+
+        if (interaction.guildId) {
+          activeGuildId = interaction.guildId;
+          activeTextChannelId = interaction.channelId;
+        }
+
+        await interaction.message.edit({
+          content: `✅ **${item.title}** adicionada à playlist.`,
+          components: [],
+        });
+
+        randomSuggestionExclusionsByMessage.delete(messageId);
+        await syncQueueMessage();
+
+        if (player.state.status === AudioPlayerStatus.Idle && !isProcessingQueue) {
+          playNextInQueue().catch(err => console.error('[random.add] erro em playNextInQueue:', err));
+        }
+      } catch (error) {
+        const msg = normalizePlaybackError(error);
+        await interaction.followUp({ content: `Não foi possível adicionar a sugestão: ${msg}`, ephemeral: true });
+      }
+
+      return;
+    }
+
+    await interaction.reply({ content: 'Ação de sugestão desconhecida.', ephemeral: true });
     return;
   }
 
@@ -753,7 +951,7 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
       queue.push(item);
       activeTextChannelId = interaction.channelId;
       activeGuildId = interaction.guildId;
-      activeVoiceChannelId = voiceChannel.id;
+      //activeVoiceChannelId = voiceChannel.id;
 
       // Conecta ao canal de voz se ainda não estiver conectado
       let connection = getVoiceConnection(interaction.guildId);
@@ -884,8 +1082,37 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     return;
   }
 
-  // ── /remove ────────────────────────────────────────────────────────────────
-  if (commandName === 'remove') {
+  // ── /random ───────────────────────────────────────────────────────────────
+  if (commandName === 'random') {
+    if (radioState !== null) {
+      await interaction.reply({ content: 'Sugestões aleatórias não estão disponíveis durante rádio ao vivo.', ephemeral: true });
+      return;
+    }
+
+    if (!currentItem && queue.length === 0) {
+      await interaction.reply({
+        content: 'A playlist está vazia. Toque ou enfileire músicas antes de usar `/random`.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    await interaction.deferReply();
+
+    try {
+      const suggestion = await suggestTrackFromPlaylist(new Set<string>());
+      const sent = await interaction.editReply(buildRandomSuggestionMessage(interaction.user.id, suggestion));
+      randomSuggestionExclusionsByMessage.set(sent.id, new Set([suggestion.track.SNG_ID]));
+    } catch (error) {
+      const msg = normalizePlaybackError(error);
+      await interaction.editReply(`Não foi possível gerar sugestão: ${msg}`);
+    }
+
+    return;
+  }
+
+  // ── /remove e /rm ─────────────────────────────────────────────────────────
+  if (commandName === 'remove' || commandName === 'rm') {
     if (radioState !== null) {
       await interaction.reply({ content: 'Não há fila ativa durante uma rádio.', ephemeral: true });
       return;
@@ -951,10 +1178,10 @@ client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     try {
       const reply = { content: 'Ocorreu um erro interno. Tente novamente.', ephemeral: true };
       if (interaction.isRepliable()) {
-        if ((interaction as any).deferred || (interaction as any).replied) {
-          await (interaction as any).editReply(reply.content);
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply(reply.content);
         } else {
-          await (interaction as any).reply(reply);
+          await interaction.reply(reply);
         }
       }
     } catch { /* ignora falha ao responder o erro */ }
