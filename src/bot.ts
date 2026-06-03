@@ -33,6 +33,7 @@ import { config } from 'dotenv';
 
 const require = createRequire(import.meta.url);
 const dfi = require('d-fi-core');
+const { getSongFileName } = require('d-fi-core/dist/deezer/lib/decrypt');
 
 config();
 
@@ -142,6 +143,9 @@ interface DfiTrack {
   SNG_TITLE: string;
   ART_NAME: string;
   VERSION?: string;
+  MD5_ORIGIN?: string;
+  MEDIA_VERSION?: string;
+  TRACK_TOKEN?: string;
 }
 
 interface DfiSearchTrack {
@@ -151,6 +155,194 @@ interface DfiSearchTrack {
 interface RandomSuggestion {
   track: DfiTrack;
   basedOn: DfiTrack;
+}
+
+interface DeezerMediaUserData {
+  licenseToken: string;
+  canStreamLossless: boolean;
+  canStreamHq: boolean;
+  country: string;
+}
+
+let deezerMediaUserData: DeezerMediaUserData | null = null;
+
+function getDeezerMediaFormat(quality: 1 | 3 | 9): 'MP3_128' | 'MP3_320' | 'FLAC' {
+  switch (quality) {
+    case 9:
+      return 'FLAC';
+    case 3:
+      return 'MP3_320';
+    case 1:
+      return 'MP3_128';
+  }
+}
+
+async function fetchDeezerMediaUserData(): Promise<DeezerMediaUserData> {
+  if (deezerMediaUserData) {
+    return deezerMediaUserData;
+  }
+
+  const response = await fetch(
+    'https://www.deezer.com/ajax/gw-light.php?method=deezer.getUserData&api_version=1.0&api_token=null',
+    {
+      headers: {
+        Accept: '*/*',
+        Cookie: `arl=${DEEZER_ARL}`,
+        'User-Agent': 'Deezer/8.32.0.2 (iOS; 14.4; Mobile; en; iPhone10_5)',
+      },
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(`Erro ao autenticar na API de mídia do Deezer: HTTP ${response.status}`);
+  }
+
+  const data = await response.json() as {
+    results?: {
+      COUNTRY?: string;
+      USER?: {
+        OPTIONS?: {
+          license_token?: string;
+          web_lossless?: boolean;
+          mobile_loseless?: boolean;
+          web_hq?: boolean;
+          mobile_hq?: boolean;
+        };
+      };
+    };
+  };
+
+  const options = data.results?.USER?.OPTIONS;
+  const licenseToken = options?.license_token;
+  if (!licenseToken) {
+    throw new Error('Não foi possível obter a licença de mídia do Deezer.');
+  }
+
+  deezerMediaUserData = {
+    licenseToken,
+    canStreamLossless: Boolean(options.web_lossless || options.mobile_loseless),
+    canStreamHq: Boolean(options.web_hq || options.mobile_hq),
+    country: data.results?.COUNTRY ?? 'desconhecido',
+  };
+
+  return deezerMediaUserData;
+}
+
+async function probeDownloadUrl(url: string): Promise<number> {
+  try {
+    const response = await fetch(url, {
+      method: 'HEAD',
+      headers: {
+        Accept: '*/*',
+        'User-Agent': 'Mozilla/5.0',
+      },
+    });
+
+    if (!response.ok) {
+      return 0;
+    }
+
+    return Number(response.headers.get('content-length') ?? '0');
+  } catch {
+    return 0;
+  }
+}
+
+function buildLegacyDeezerDownloadUrl(track: DfiTrack, quality: 1 | 3 | 9): string | null {
+  if (!track.MD5_ORIGIN || !track.SNG_ID || !track.MEDIA_VERSION) {
+    return null;
+  }
+
+  const filename = getSongFileName(track, quality);
+  return `https://e-cdns-proxy-${track.MD5_ORIGIN[0]}.dzcdn.net/mobile/1/${filename}`;
+}
+
+async function getOfficialTrackDownloadUrl(track: DfiTrack, quality: 1 | 3 | 9): Promise<string | null> {
+  if (!track.TRACK_TOKEN) {
+    return null;
+  }
+
+  const user = await fetchDeezerMediaUserData();
+  const format = getDeezerMediaFormat(quality);
+
+  if ((format === 'FLAC' && !user.canStreamLossless) || (format === 'MP3_320' && !user.canStreamHq)) {
+    return null;
+  }
+
+  const response = await fetch('https://media.deezer.com/v1/get_url', {
+    method: 'POST',
+    headers: {
+      Accept: '*/*',
+      'Content-Type': 'application/json; charset=UTF-8',
+      'User-Agent': 'Deezer/8.32.0.2 (iOS; 14.4; Mobile; en; iPhone10_5)',
+    },
+    body: JSON.stringify({
+      license_token: user.licenseToken,
+      media: [
+        {
+          type: 'FULL',
+          formats: [{ format, cipher: 'BF_CBC_STRIPE' }],
+        },
+      ],
+      track_tokens: [track.TRACK_TOKEN],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Erro ao consultar mídia do Deezer: HTTP ${response.status}`);
+  }
+
+  const data = await response.json() as {
+    data?: Array<{
+      errors?: Array<Record<string, unknown>>;
+      media?: Array<{
+        sources?: Array<{
+          url?: string;
+        }>;
+      }>;
+    }>;
+  };
+
+  const firstItem = Array.isArray(data.data) ? data.data[0] : undefined;
+  if (!firstItem) {
+    return null;
+  }
+
+  const firstError = Array.isArray(firstItem.errors) ? firstItem.errors[0] : undefined;
+  if (firstError) {
+    if (firstError.code === 2002) {
+      throw new Error(`Esta faixa não está disponível no seu país (${user.country}).`);
+    }
+
+    throw new Error(
+      Object.entries(firstError)
+        .map(([key, value]) => `${key}: ${String(value)}`)
+        .join(', '),
+    );
+  }
+
+  const sourceUrl = firstItem.media?.[0]?.sources?.[0]?.url;
+  return typeof sourceUrl === 'string' && sourceUrl.length > 0 ? sourceUrl : null;
+}
+
+async function getTrackDownloadInfo(track: DfiTrack, quality: 1 | 3 | 9): Promise<{ trackUrl: string; isEncrypted: boolean } | null> {
+  const officialUrl = await getOfficialTrackDownloadUrl(track, quality);
+  if (officialUrl && await probeDownloadUrl(officialUrl) > 0) {
+    return {
+      trackUrl: officialUrl,
+      isEncrypted: officialUrl.includes('/mobile/') || officialUrl.includes('/media/'),
+    };
+  }
+
+  const legacyUrl = buildLegacyDeezerDownloadUrl(track, quality);
+  if (legacyUrl && await probeDownloadUrl(legacyUrl) > 0) {
+    return {
+      trackUrl: legacyUrl,
+      isEncrypted: legacyUrl.includes('/mobile/') || legacyUrl.includes('/media/'),
+    };
+  }
+
+  return null;
 }
 
 async function fetchTrack(query: string): Promise<{ type: 'deezer'; track: DfiTrack }> {
@@ -190,7 +382,7 @@ async function downloadTrack(track: DfiTrack): Promise<Buffer> {
 
   for (const quality of preferredQualities) {
     try {
-      const dlInfo = await dfi.getTrackDownloadUrl(track, quality);
+      const dlInfo = await getTrackDownloadInfo(track, quality);
       if (!dlInfo) {
         continue;
       }
