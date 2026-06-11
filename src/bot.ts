@@ -310,15 +310,12 @@ async function getOfficialTrackDownloadUrl(track: DfiTrack, quality: 1 | 3 | 9):
 
   const firstError = Array.isArray(firstItem.errors) ? firstItem.errors[0] : undefined;
   if (firstError) {
-    if (firstError.code === 2002) {
-      throw new Error(`Esta faixa não está disponível no seu país (${user.country}).`);
-    }
-
-    throw new Error(
-      Object.entries(firstError)
-        .map(([key, value]) => `${key}: ${String(value)}`)
-        .join(', '),
+    console.warn(
+      `[deezer] Mídia oficial indisponível (${
+        Object.entries(firstError).map(([key, value]) => `${key}: ${String(value)}`).join(', ')
+      }), tentando URL legado.`,
     );
+    return null;
   }
 
   const sourceUrl = firstItem.media?.[0]?.sources?.[0]?.url;
